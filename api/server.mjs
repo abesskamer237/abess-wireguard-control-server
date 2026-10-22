@@ -195,6 +195,31 @@ async function deletePeer(name) {
   await writeState(state);
   return {deleted:name};
 }
+async function expireSubscriptionsAndRevokePeers() {
+  const state = await readState();
+  const now = Date.now();
+  let changed = false;
+  for (const subscription of state.subscriptions) {
+    const expiry = Date.parse(subscription.expiresAt);
+    if (subscription.status === 'active' && Number.isFinite(expiry) && expiry <= now) {
+      subscription.status = 'expired';
+      changed = true;
+    }
+  }
+  if (changed) await writeState(state);
+  const expiredIds = new Set(state.subscriptions
+    .filter(subscription => {
+      const expiry = Date.parse(subscription.expiresAt);
+      return Number.isFinite(expiry) && expiry <= now;
+    })
+    .map(subscription => subscription.id));
+  for (const peer of state.peers) {
+    if (peer.subscriptionId && expiredIds.has(peer.subscriptionId)) {
+      try { await deletePeer(peer.name); }
+      catch (error) { console.error('[EXPIRY] Failed to revoke expired peer:', peer.name, error.message); }
+    }
+  }
+}
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url || '/', 'http://127.0.0.1');
   try {
@@ -216,10 +241,10 @@ const server = http.createServer(async (req, res) => {
       const state = await readState();
       return json(res, 200, state.subscriptions.map(({paymentReference, ...item}) => ({...item, paymentReference: paymentReference ? '••••' + paymentReference.slice(-4) : null})));
     }
-    const confirmMatch = url.pathname.match(/^\\/v1\\/subscriptions\\/([a-f0-9]+)\\/confirm-payment$/);
+    const confirmMatch = url.pathname.match(/^\/v1\/subscriptions\/(sub_[a-f0-9]+)\/confirm-payment$/);
     if (req.method === 'POST' && confirmMatch) {
       const body = await readBody(req);
-      const task = queue.then(() => confirmSubscriptionPayment('sub_' + confirmMatch[1], body.paymentReference));
+      const task = queue.then(() => confirmSubscriptionPayment(confirmMatch[1], body.paymentReference));
       queue = task.catch(() => {});
       return json(res, 200, await task);
     }
@@ -247,4 +272,11 @@ const server = http.createServer(async (req, res) => {
     return json(res, e.status || 500, {error:e.status ? e.message : 'internal error', ...(process.env.NODE_ENV === 'development' ? {detail:e.message} : {})});
   }
 });
-server.listen(PORT, HOST, () => console.log('ABESS WireGuard API listening on http://' + HOST + ':' + PORT));
+server.listen(PORT, HOST, () => {
+  console.log('ABESS WireGuard API listening on http://' + HOST + ':' + PORT);
+  const expiryTimer = setInterval(() => {
+    const task = queue.then(() => expireSubscriptionsAndRevokePeers());
+    queue = task.catch(error => console.error('[EXPIRY] Reconciliation failed:', error.message));
+  }, 60_000);
+  expiryTimer.unref();
+});
