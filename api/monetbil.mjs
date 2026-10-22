@@ -26,7 +26,7 @@ export function verifyMonetbilNotification(params, serviceSecret) {
 export function validMonetbilAmount(value) {
   if (typeof value !== 'string' && typeof value !== 'number') return null;
   const raw = String(value).trim();
-  if (!/^\\d+(?:\\.0+)?$/.test(raw)) return null;
+  if (!/^\d+(?:\.0+)?$/.test(raw)) return null;
   const amount = Number(raw);
   return Number.isSafeInteger(amount) ? amount : null;
 }
