@@ -4,7 +4,7 @@
  */
 export function removeManagedPeerBlock(config, name) {
   const lines = String(config).split(/\r?\n/);
-  const marker = '# managed-by-abess-api:' + name;
+  const marker = '# managed-by-luna-api:' + name;
   const index = lines.findIndex(line => line.trim() === marker);
   if (index < 0) return { config, removed: false };
 
@@ -12,7 +12,7 @@ export function removeManagedPeerBlock(config, name) {
   if (lines[end]?.trim() === '[Peer]') end++;
   while (end < lines.length) {
     const line = lines[end].trim();
-    if (line === '[Interface]' || line === '[Peer]' || line.startsWith('# managed-by-abess-api:')) break;
+    if (line === '[Interface]' || line === '[Peer]' || line.startsWith('# managed-by-luna-api:')) break;
     end++;
   }
 
