@@ -7,7 +7,7 @@ test('removes only the requested managed peer and preserves following peers', ()
     '[Interface]',
     'Address = 10.77.0.1/24',
     '',
-    '# managed-by-abess-api:phone-1',
+    '# managed-by-luna-api:phone-1',
     '[Peer]',
     'PublicKey = PHONE1',
     'AllowedIPs = 10.77.0.2/32',
@@ -16,7 +16,7 @@ test('removes only the requested managed peer and preserves following peers', ()
     'PublicKey = MANUAL',
     'AllowedIPs = 10.77.0.99/32',
     '',
-    '# managed-by-abess-api:laptop-1',
+    '# managed-by-luna-api:laptop-1',
     '[Peer]',
     'PublicKey = LAPTOP',
     'AllowedIPs = 10.77.0.3/32',
@@ -28,7 +28,7 @@ test('removes only the requested managed peer and preserves following peers', ()
   assert.doesNotMatch(result.config, /PHONE1/);
   assert.match(result.config, /PublicKey = MANUAL/);
   assert.match(result.config, /PublicKey = LAPTOP/);
-  assert.match(result.config, /# managed-by-abess-api:laptop-1/);
+  assert.match(result.config, /# managed-by-luna-api:laptop-1/);
 });
 
 test('does not modify config when the managed marker is absent', () => {
@@ -37,7 +37,7 @@ test('does not modify config when the managed marker is absent', () => {
 });
 
 test('removes the last managed peer without removing the interface', () => {
-  const source = '[Interface]\nAddress = 10.77.0.1/24\n\n# managed-by-abess-api:phone-1\n[Peer]\nPublicKey = PHONE1\nAllowedIPs = 10.77.0.2/32\n';
+  const source = '[Interface]\nAddress = 10.77.0.1/24\n\n# managed-by-luna-api:phone-1\n[Peer]\nPublicKey = PHONE1\nAllowedIPs = 10.77.0.2/32\n';
   const result = removeManagedPeerBlock(source, 'phone-1');
   assert.equal(result.removed, true);
   assert.match(result.config, /\[Interface\]/);
