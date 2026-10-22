@@ -36,6 +36,9 @@ ADMIN_TOKEN=$TOKEN
 SERVER_ENDPOINT=SERVER_PUBLIC_IP_OR_DNS:51820
 CLIENT_DNS=1.1.1.1
 CLIENT_ALLOWED_IPS=0.0.0.0/0
+MONETBIL_SERVICE_KEY=
+MONETBIL_SERVICE_SECRET=
+PUBLIC_API_BASE_URL=https://YOUR_API_DOMAIN
 EOF
   chmod 600 /etc/luna-wireguard-api.env
   echo "Created /etc/luna-wireguard-api.env; edit SERVER_ENDPOINT and Monetbil settings before use."
