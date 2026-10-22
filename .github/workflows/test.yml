@@ -21,4 +21,4 @@ jobs:
         working-directory: api
         run: npm test
       - name: Check JavaScript syntax
-        run: node --check api/server.mjs && node --check api/peer-config.mjs && node --check api/enrollment-token.mjs
+        run: node --check api/server.mjs && node --check api/peer-config.mjs && node --check api/enrollment-token.mjs && node --check api/access-control.mjs && node --check api/payment-webhook.mjs
