@@ -1,1 +1,1 @@
-{"name":"abess-wireguard-control-api","version":"0.1.0","private":true,"type":"module","scripts":{"start":"node server.mjs","test":"node --test"},"engines":{"node":">=20"}}
+{"name":"luna-wireguard-control-api","version":"0.1.0","private":true,"type":"module","scripts":{"start":"node server.mjs","test":"node --test"},"engines":{"node":">=20"}}
