@@ -3,7 +3,7 @@ import { createHash, timingSafeEqual } from 'node:crypto';
 function normalizedParams(params) {
   const entries = Object.entries(params)
     .filter(([key]) => key !== 'sign')
-    .sort(([a], [b]) => a.localeCompare(b, 'en'));
+    .sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0);
   return entries.map(([key, value]) => [key, String(value ?? '')]);
 }
 
