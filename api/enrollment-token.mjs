@@ -16,3 +16,9 @@ export function createEnrollmentSecret() {
   const token = randomBytes(32).toString('base64url');
   return { token, tokenHash: hashEnrollmentToken(token) };
 }
+
+export function isEnrollmentTokenUsable(record, now = Date.now()) {
+  if (!record || record.usedAt) return false;
+  const expiry = Date.parse(record.expiresAt);
+  return Number.isFinite(expiry) && expiry > now;
+}
