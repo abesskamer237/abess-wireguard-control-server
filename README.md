@@ -12,7 +12,7 @@ Clean-room baseline for standard WireGuard over UDP with an administrative peer-
 
 Review the scripts and configuration examples before running them. The API installer runs the API as root because it updates WireGuard configuration. Keep it bound to 127.0.0.1 and expose it only through a properly authenticated TLS reverse proxy. Do not expose the administrative API directly to the Internet.
 
-The installer creates a strong ADMIN_TOKEN and prints it once. Store it securely. Never embed it in Android or commit it to Git.
+Set a random ADMIN_TOKEN of at least 32 characters in the protected service environment. Store it securely. Never embed it in Android or commit it to Git. If you deploy through your own install script, ensure it generates this secret and restricts the environment file to root.
 
 ## API routes
 
@@ -39,5 +39,7 @@ The enrollment token is single-use and time-limited, but this remains a prototyp
     node --check server.mjs
     node --check peer-config.mjs
     node --check enrollment-token.mjs
+    node --check access-control.mjs
+    node --check payment-webhook.mjs
 
 GitHub Actions runs the test suite and syntax checks on pushes and pull requests.
