@@ -3,7 +3,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { createEnrollmentSecret, hashEnrollmentToken, equalHexHash } from './enrollment-token.mjs';
+import { createEnrollmentSecret, hashEnrollmentToken, equalHexHash, isEnrollmentTokenUsable } from './enrollment-token.mjs';
 import { removeManagedPeerBlock } from './peer-config.mjs';
 
 const execFileAsync = promisify(execFile);
@@ -87,7 +87,7 @@ async function enrollWithToken(token) {
   const state = await readState();
   const candidate = hashEnrollmentToken(token);
   const record = state.enrollmentTokens.find(t => equalHexHash(t.tokenHash, candidate));
-  if (!record || record.usedAt || Date.parse(record.expiresAt) <= Date.now())
+  if (!record || !isEnrollmentTokenUsable(record))
     throw Object.assign(new Error('invalid, expired, or already used enrollment token'), {status:401});
   // Burn the token before creating a peer so concurrent/replayed requests cannot reuse it.
   record.usedAt = new Date().toISOString();
