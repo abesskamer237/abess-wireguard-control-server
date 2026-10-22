@@ -34,5 +34,6 @@ The enrollment token is single-use and time-limited, but this remains a prototyp
     npm test
     node --check server.mjs
     node --check peer-config.mjs
+    node --check enrollment-token.mjs
 
 GitHub Actions runs the test suite and syntax checks on pushes and pull requests.
