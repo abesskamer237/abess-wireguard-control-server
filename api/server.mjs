@@ -3,6 +3,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { randomBytes, createHash, timingSafeEqual } from 'node:crypto';
 import { removeManagedPeerBlock } from './peer-config.mjs';
 
 const execFileAsync = promisify(execFile);
@@ -30,8 +31,16 @@ async function readBody(req) {
 }
 async function statePath() { await fs.mkdir(STATE_DIR, {recursive:true, mode:0o700}); return path.join(STATE_DIR, 'peers.json'); }
 async function readState() {
-  try { return JSON.parse(await fs.readFile(await statePath(), 'utf8')); }
-  catch (e) { if (e.code === 'ENOENT') return {peers:[]}; throw e; }
+  try {
+    const parsed = JSON.parse(await fs.readFile(await statePath(), 'utf8'));
+    return {
+      peers: Array.isArray(parsed.peers) ? parsed.peers : [],
+      enrollmentTokens: Array.isArray(parsed.enrollmentTokens) ? parsed.enrollmentTokens : []
+    };
+  } catch (e) {
+    if (e.code === 'ENOENT') return {peers:[], enrollmentTokens:[]};
+    throw e;
+  }
 }
 async function writeState(s) { await fs.writeFile(await statePath(), JSON.stringify(s, null, 2), {mode:0o600}); }
 function isAdmin(req) { return ADMIN_TOKEN.length >= 32 && (req.headers.authorization || '') === 'Bearer ' + ADMIN_TOKEN; }
@@ -50,6 +59,48 @@ async function syncLiveConfig() {
   const tmp = path.join(STATE_DIR, 'wg0-' + process.pid + '.conf');
   await fs.writeFile(tmp, stdout, {mode:0o600});
   try { await execFileAsync('wg', ['syncconf', 'wg0', tmp]); } finally { await fs.rm(tmp, {force:true}); }
+}
+function hashEnrollmentToken(token) {
+  return createHash('sha256').update(token, 'utf8').digest('hex');
+}
+function equalHexHash(a, b) {
+  if (typeof a !== 'string' || typeof b !== 'string' || !/^[a-f0-9]{64}$/.test(a) || !/^[a-f0-9]{64}$/.test(b)) return false;
+  const left = Buffer.from(a, 'hex'), right = Buffer.from(b, 'hex');
+  return left.length === right.length && timingSafeEqual(left, right);
+}
+async function createEnrollmentToken(name, ttlSeconds = 300) {
+  if (!safeName(name)) throw Object.assign(new Error('invalid device name'), {status:400});
+  if (!Number.isInteger(ttlSeconds) || ttlSeconds < 60 || ttlSeconds > 3600)
+    throw Object.assign(new Error('ttlSeconds must be an integer from 60 to 3600'), {status:400});
+  const state = await readState();
+  if (state.peers.some(p => p.name === name) ||
+      state.enrollmentTokens.some(t => t.name === name && !t.usedAt && Date.parse(t.expiresAt) > Date.now()))
+    throw Object.assign(new Error('peer or pending enrollment already exists for this name'), {status:409});
+  const token = randomBytes(32).toString('base64url');
+  const createdAt = new Date();
+  const expiresAt = new Date(createdAt.getTime() + ttlSeconds * 1000);
+  state.enrollmentTokens.push({
+    name,
+    tokenHash: hashEnrollmentToken(token),
+    createdAt: createdAt.toISOString(),
+    expiresAt: expiresAt.toISOString(),
+    usedAt: null
+  });
+  await writeState(state);
+  return {name, token, expiresAt: expiresAt.toISOString(), oneTime: true};
+}
+async function enrollWithToken(token) {
+  if (typeof token !== 'string' || token.length < 32 || token.length > 256)
+    throw Object.assign(new Error('invalid enrollment token'), {status:401});
+  const state = await readState();
+  const candidate = hashEnrollmentToken(token);
+  const record = state.enrollmentTokens.find(t => equalHexHash(t.tokenHash, candidate));
+  if (!record || record.usedAt || Date.parse(record.expiresAt) <= Date.now())
+    throw Object.assign(new Error('invalid, expired, or already used enrollment token'), {status:401});
+  // Burn the token before creating a peer so concurrent/replayed requests cannot reuse it.
+  record.usedAt = new Date().toISOString();
+  await writeState(state);
+  return createPeer(record.name);
 }
 async function createPeer(name) {
   if (!ENDPOINT || ENDPOINT.includes('SERVER_PUBLIC_IP_OR_DNS')) throw new Error('Set SERVER_ENDPOINT in /etc/abess-wireguard-api.env');
@@ -95,7 +146,21 @@ const server = http.createServer(async (req, res) => {
   const url = new URL(req.url || '/', 'http://127.0.0.1');
   try {
     if (req.method === 'GET' && url.pathname === '/health') return json(res, 200, {ok:true, service:'abess-wireguard-control-api'});
+    if (req.method === 'POST' && url.pathname === '/v1/enroll') {
+      const body = await readBody(req);
+      const task = queue.then(() => enrollWithToken(body.token));
+      queue = task.catch(() => {});
+      return json(res, 201, await task);
+    }
     if (!isAdmin(req)) return json(res, 401, {error:'unauthorized'});
+    if (req.method === 'POST' && url.pathname === '/v1/enrollment-tokens') {
+      const body = await readBody(req);
+      if (!safeName(body.name)) return json(res, 400, {error:'name must match [a-zA-Z0-9][a-zA-Z0-9_-]{0,30}'});
+      const ttl = body.ttlSeconds === undefined ? 300 : body.ttlSeconds;
+      const task = queue.then(() => createEnrollmentToken(body.name, ttl));
+      queue = task.catch(() => {});
+      return json(res, 201, await task);
+    }
     if (req.method === 'POST' && url.pathname === '/v1/peers') {
       const body = await readBody(req);
       if (!safeName(body.name)) return json(res, 400, {error:'name must match [a-zA-Z0-9][a-zA-Z0-9_-]{0,30}'});
