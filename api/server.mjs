@@ -5,6 +5,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { createEnrollmentSecret, hashEnrollmentToken, equalHexHash, isEnrollmentTokenUsable } from './enrollment-token.mjs';
 import { removeManagedPeerBlock } from './peer-config.mjs';
+import { validateSubscriptionInput, isSubscriptionUsable, countSubscriptionPeers } from './access-control.mjs';
 
 const execFileAsync = promisify(execFile);
 const PORT = Number(process.env.PORT || 8787);
@@ -35,10 +36,11 @@ async function readState() {
     const parsed = JSON.parse(await fs.readFile(await statePath(), 'utf8'));
     return {
       peers: Array.isArray(parsed.peers) ? parsed.peers : [],
-      enrollmentTokens: Array.isArray(parsed.enrollmentTokens) ? parsed.enrollmentTokens : []
+      enrollmentTokens: Array.isArray(parsed.enrollmentTokens) ? parsed.enrollmentTokens : [],
+      subscriptions: Array.isArray(parsed.subscriptions) ? parsed.subscriptions : []
     };
   } catch (e) {
-    if (e.code === 'ENOENT') return {peers:[], enrollmentTokens:[]};
+    if (e.code === 'ENOENT') return {peers:[], enrollmentTokens:[], subscriptions:[]};
     throw e;
   }
 }
@@ -60,26 +62,77 @@ async function syncLiveConfig() {
   await fs.writeFile(tmp, stdout, {mode:0o600});
   try { await execFileAsync('wg', ['syncconf', 'wg0', tmp]); } finally { await fs.rm(tmp, {force:true}); }
 }
-async function createEnrollmentToken(name, ttlSeconds = 300) {
+async function createSubscription(input) {
+  const checked = validateSubscriptionInput(input);
+  if (!checked.ok) throw Object.assign(new Error(checked.error), {status:400});
+  const state = await readState();
+  const subscription = {
+    id: 'sub_' + randomBytes(12).toString('hex'),
+    customerId: checked.value.customerId,
+    plan: checked.value.plan,
+    amountXaf: checked.value.amountXaf,
+    currency: checked.value.currency,
+    durationDays: checked.value.durationDays,
+    maxDevices: checked.value.maxDevices,
+    status: 'pending_payment',
+    createdAt: new Date().toISOString(),
+    paidAt: null,
+    expiresAt: null,
+    paymentReference: null
+  };
+  state.subscriptions.push(subscription);
+  await writeState(state);
+  return subscription;
+}
+async function confirmSubscriptionPayment(id, paymentReference) {
+  if (typeof paymentReference !== 'string' || paymentReference.trim().length < 4 || paymentReference.trim().length > 160)
+    throw Object.assign(new Error('paymentReference must contain 4–160 characters'), {status:400});
+  const state = await readState();
+  const subscription = state.subscriptions.find(item => item.id === id);
+  if (!subscription) throw Object.assign(new Error('subscription not found'), {status:404});
+  if (state.subscriptions.some(item => item.id !== id && item.paymentReference === paymentReference.trim()))
+    throw Object.assign(new Error('payment reference already used'), {status:409});
+  if (subscription.status === 'active' && subscription.paymentReference === paymentReference.trim()) {
+    return {subscription, alreadyConfirmed:true};
+  }
+  if (subscription.status !== 'pending_payment')
+    throw Object.assign(new Error('subscription is not awaiting payment'), {status:409});
+  const now = new Date();
+  subscription.status = 'active';
+  subscription.paidAt = now.toISOString();
+  subscription.paymentReference = paymentReference.trim();
+  subscription.expiresAt = new Date(now.getTime() + subscription.durationDays * 24 * 60 * 60 * 1000).toISOString();
+  await writeState(state);
+  return {subscription, alreadyConfirmed:false};
+}
+async function createEnrollmentToken(name, ttlSeconds = 300, subscriptionId) {
   if (!safeName(name)) throw Object.assign(new Error('invalid device name'), {status:400});
   if (!Number.isInteger(ttlSeconds) || ttlSeconds < 60 || ttlSeconds > 3600)
     throw Object.assign(new Error('ttlSeconds must be an integer from 60 to 3600'), {status:400});
+  if (typeof subscriptionId !== 'string' || !subscriptionId.trim())
+    throw Object.assign(new Error('subscriptionId is required'), {status:400});
   const state = await readState();
+  const subscription = state.subscriptions.find(item => item.id === subscriptionId);
+  if (!isSubscriptionUsable(subscription))
+    throw Object.assign(new Error('subscription is not active or has expired'), {status:403});
   if (state.peers.some(p => p.name === name) ||
       state.enrollmentTokens.some(t => t.name === name && !t.usedAt && Date.parse(t.expiresAt) > Date.now()))
     throw Object.assign(new Error('peer or pending enrollment already exists for this name'), {status:409});
+  if (countSubscriptionPeers(state.peers, subscriptionId) >= subscription.maxDevices)
+    throw Object.assign(new Error('device limit reached for this subscription'), {status:409});
   const {token, tokenHash} = createEnrollmentSecret();
   const createdAt = new Date();
   const expiresAt = new Date(createdAt.getTime() + ttlSeconds * 1000);
   state.enrollmentTokens.push({
     name,
+    subscriptionId,
     tokenHash,
     createdAt: createdAt.toISOString(),
     expiresAt: expiresAt.toISOString(),
     usedAt: null
   });
   await writeState(state);
-  return {name, token, expiresAt: expiresAt.toISOString(), oneTime: true};
+  return {name, subscriptionId, token, expiresAt: expiresAt.toISOString(), oneTime: true};
 }
 async function enrollWithToken(token) {
   if (typeof token !== 'string' || token.length < 32 || token.length > 256)
@@ -92,12 +145,20 @@ async function enrollWithToken(token) {
   // Burn the token before creating a peer so concurrent/replayed requests cannot reuse it.
   record.usedAt = new Date().toISOString();
   await writeState(state);
-  return createPeer(record.name);
+  return createPeer(record.name, record.subscriptionId);
 }
-async function createPeer(name) {
+async function createPeer(name, subscriptionId = null) {
   if (!ENDPOINT || ENDPOINT.includes('SERVER_PUBLIC_IP_OR_DNS')) throw new Error('Set SERVER_ENDPOINT in /etc/abess-wireguard-api.env');
   const state = await readState();
   if (state.peers.some(p => p.name === name)) throw Object.assign(new Error('peer name already exists'), {status:409});
+  let subscription = null;
+  if (subscriptionId) {
+    subscription = state.subscriptions.find(item => item.id === subscriptionId);
+    if (!isSubscriptionUsable(subscription))
+      throw Object.assign(new Error('subscription is not active or has expired'), {status:403});
+    if (countSubscriptionPeers(state.peers, subscriptionId) >= subscription.maxDevices)
+      throw Object.assign(new Error('device limit reached for this subscription'), {status:409});
+  }
   const used = new Set(state.peers.map(p => p.ip));
   let host = 2; while (host < 255 && used.has('10.77.0.' + host)) host++;
   if (host >= 255) throw new Error('peer address pool exhausted');
@@ -113,9 +174,9 @@ async function createPeer(name) {
   await fs.writeFile(WG_CONF, current.trimEnd() + '\n' + block, {mode:0o600});
   try { await syncLiveConfig(); }
   catch (e) { await fs.writeFile(WG_CONF, current, {mode:0o600}); throw new Error('Peer activation failed; config rolled back: ' + e.message); }
-  state.peers.push({name, ip, publicKey, presharedKey, createdAt:new Date().toISOString()});
+  state.peers.push({name, ip, publicKey, presharedKey, subscriptionId: subscriptionId || undefined, createdAt:new Date().toISOString()});
   await writeState(state);
-  return {name, config:'[Interface]\nPrivateKey = ' + privateKey + '\nAddress = ' + ip + '/32\nDNS = ' + DNS + '\n\n[Peer]\nPublicKey = ' + await serverPublicKey() + '\nPresharedKey = ' + presharedKey + '\nEndpoint = ' + ENDPOINT + '\nAllowedIPs = ' + ALLOWED_IPS + '\nPersistentKeepalive = 25\n', note:'Save this config securely; the server does not store the client private key.'};
+  return {name, subscription: subscription ? {id:subscription.id, plan:subscription.plan, expiresAt:subscription.expiresAt, maxDevices:subscription.maxDevices} : undefined, config:'[Interface]\nPrivateKey = ' + privateKey + '\nAddress = ' + ip + '/32\nDNS = ' + DNS + '\n\n[Peer]\nPublicKey = ' + await serverPublicKey() + '\nPresharedKey = ' + presharedKey + '\nEndpoint = ' + ENDPOINT + '\nAllowedIPs = ' + ALLOWED_IPS + '\nPersistentKeepalive = 25\n', note:'Save this config securely; the server does not store the client private key.'};
 }
 async function deletePeer(name) {
   const state = await readState();
@@ -145,18 +206,35 @@ const server = http.createServer(async (req, res) => {
       return json(res, 201, await task);
     }
     if (!isAdmin(req)) return json(res, 401, {error:'unauthorized'});
+    if (req.method === 'POST' && url.pathname === '/v1/subscriptions') {
+      const body = await readBody(req);
+      const task = queue.then(() => createSubscription(body));
+      queue = task.catch(() => {});
+      return json(res, 201, await task);
+    }
+    if (req.method === 'GET' && url.pathname === '/v1/subscriptions') {
+      const state = await readState();
+      return json(res, 200, state.subscriptions.map(({paymentReference, ...item}) => ({...item, paymentReference: paymentReference ? '••••' + paymentReference.slice(-4) : null})));
+    }
+    const confirmMatch = url.pathname.match(/^\\/v1\\/subscriptions\\/([a-f0-9]+)\\/confirm-payment$/);
+    if (req.method === 'POST' && confirmMatch) {
+      const body = await readBody(req);
+      const task = queue.then(() => confirmSubscriptionPayment('sub_' + confirmMatch[1], body.paymentReference));
+      queue = task.catch(() => {});
+      return json(res, 200, await task);
+    }
     if (req.method === 'POST' && url.pathname === '/v1/enrollment-tokens') {
       const body = await readBody(req);
       if (!safeName(body.name)) return json(res, 400, {error:'name must match [a-zA-Z0-9][a-zA-Z0-9_-]{0,30}'});
       const ttl = body.ttlSeconds === undefined ? 300 : body.ttlSeconds;
-      const task = queue.then(() => createEnrollmentToken(body.name, ttl));
+      const task = queue.then(() => createEnrollmentToken(body.name, ttl, body.subscriptionId));
       queue = task.catch(() => {});
       return json(res, 201, await task);
     }
     if (req.method === 'POST' && url.pathname === '/v1/peers') {
       const body = await readBody(req);
       if (!safeName(body.name)) return json(res, 400, {error:'name must match [a-zA-Z0-9][a-zA-Z0-9_-]{0,30}'});
-      const task = queue.then(() => createPeer(body.name)); queue = task.catch(() => {});
+      const task = queue.then(() => createPeer(body.name, body.subscriptionId || null)); queue = task.catch(() => {});
       return json(res, 201, await task);
     }
     const match = url.pathname.match(/^\/v1\/peers\/([a-zA-Z0-9][a-zA-Z0-9_-]{0,30})$/);
