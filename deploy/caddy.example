@@ -1,0 +1,4 @@
+# Example only. Add an authentication layer and IP restrictions before use.
+vpn-api.example.com {
+    reverse_proxy 127.0.0.1:8787
+}
