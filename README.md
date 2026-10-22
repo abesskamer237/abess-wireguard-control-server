@@ -17,7 +17,11 @@ The installer creates a strong ADMIN_TOKEN and prints it once. Store it securely
 ## API routes
 
 - GET /health — basic process health (no authentication).
-- POST /v1/enrollment-tokens — **admin only**. JSON: {"name":"phone-01","ttlSeconds":300}. Creates a random one-time code; allowed lifetime is 60–3600 seconds. The code is returned only once; only its SHA-256 hash is stored.
+- POST /v1/subscriptions — **admin only**. JSON: {"customerId":"client-01","plan":"Mensuel","amountXaf":2500,"currency":"XAF","durationDays":30,"maxDevices":2}. Creates a pending-payment subscription.
+- GET /v1/subscriptions — **admin only**. Lists subscriptions; payment references are masked.
+- POST /v1/subscriptions/:id/confirm-payment — **admin only**, for manual confirmation after checking the actual payment in the provider dashboard. JSON: {"paymentReference":"provider-reference"}.
+- POST /v1/webhooks/payment — accepts only canonical payment events signed with PAYMENT_WEBHOOK_SECRET via X-Abess-Signature. The signed fields are subscriptionId, status, amountXaf, currency, paymentReference. A provider-specific adapter must first verify the provider's own webhook signature/status, then forward the canonical event.
+- POST /v1/enrollment-tokens — **admin only**. JSON: {"name":"phone-01","subscriptionId":"sub_...","ttlSeconds":300}. A paid, active, unexpired subscription is required; device-limit checks happen before issuing the code. Allowed code lifetime is 60–3600 seconds. The code is returned only once; only its SHA-256 hash is stored.
 - POST /v1/enroll — public client endpoint, intended to be exposed only through HTTPS. JSON: {"token":"<one-time-code>"}. Consumes the code and returns a WireGuard configuration. Replays, expired codes, and invalid codes are rejected.
 - POST /v1/peers — **admin only**. JSON: {"name":"device-01"}. Creates a peer and returns its client configuration.
 - DELETE /v1/peers/:name — **admin only**. Revokes a managed peer.
@@ -26,7 +30,7 @@ Admin routes require Authorization: Bearer <ADMIN_TOKEN>. The Android app must u
 
 ## Limitations before production
 
-The enrollment token is single-use and time-limited, but this remains a prototype. Add per-user authentication, subscription/payment checks, device limits, rate limiting, audit logs, monitoring, and robust secret/key lifecycle management before public launch. A peer's private key is generated on the server and returned once to the enrolling client; protect responses and device storage.
+The enrollment token is single-use and time-limited, but this remains a prototype. Before public launch, connect and test a provider-specific payment adapter, add rate limiting, audit logs, monitoring, per-customer authentication, and robust secret/key lifecycle management. A peer's private key is generated on the server and returned once to the enrolling client; protect responses and device storage.
 
 ## Tests
 
