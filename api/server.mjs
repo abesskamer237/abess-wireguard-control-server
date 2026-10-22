@@ -3,6 +3,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { removeManagedPeerBlock } from './peer-config.mjs';
 
 const execFileAsync = promisify(execFile);
 const PORT = Number(process.env.PORT || 8787);
@@ -77,17 +78,15 @@ async function deletePeer(name) {
   const state = await readState();
   if (!state.peers.some(p => p.name === name)) throw Object.assign(new Error('peer not found'), {status:404});
   const current = await fs.readFile(WG_CONF, 'utf8');
-  const lines = current.split('\n'), out = [];
-  let skipping = false;
-  for (const line of lines) {
-    if (line.trim() === '# managed-by-abess-api:' + name) { skipping = true; continue; }
-    if (skipping && line.trim().startsWith('# managed-by-abess-api:')) skipping = false;
-    if (skipping && line.trim() === '[Interface]') skipping = false;
-    if (!skipping) out.push(line);
-  }
-  await fs.writeFile(WG_CONF, out.join('\n').replace(/\n{3,}/g, '\n\n'), {mode:0o600});
+  const result = removeManagedPeerBlock(current, name);
+  if (!result.removed) throw new Error('Managed peer block not found in WireGuard config; refusing to alter state');
+  await fs.writeFile(WG_CONF, result.config, {mode:0o600});
   try { await syncLiveConfig(); }
-  catch (e) { await fs.writeFile(WG_CONF, current, {mode:0o600}); throw new Error('Peer removal failed; config restored: ' + e.message); }
+  catch (e) {
+    await fs.writeFile(WG_CONF, current, {mode:0o600});
+    try { await syncLiveConfig(); } catch {}
+    throw new Error('Peer removal failed; config restored: ' + e.message);
+  }
   state.peers = state.peers.filter(p => p.name !== name);
   await writeState(state);
   return {deleted:name};
