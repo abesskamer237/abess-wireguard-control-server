@@ -17,7 +17,7 @@ curl --fail-with-body --silent --show-error \
   --data '{"customerId":"client-01","plan":"Mensuel","amountXaf":2500,"currency":"XAF","durationDays":30,"maxDevices":2}'
 ```
 
-After verifying the actual payment with the payment provider, confirm it with the returned subscription ID:
+For manual administration only, after verifying the actual payment with the provider, confirm it with the returned subscription ID:
 
 ```bash
 curl --fail-with-body --silent --show-error \
@@ -27,7 +27,7 @@ curl --fail-with-body --silent --show-error \
   --data '{"paymentReference":"provider-transaction-reference"}'
 ```
 
-This is a manual confirmation path. Automated confirmation requires a provider-specific adapter; see `docs/subscriptions-payments-transports.md`.
+For automated Monetbil payment, start checkout at `POST /v1/payments/monetbil/checkout` with the pending subscription ID and phone number; the signed callback activates the subscription. See `docs/subscriptions-payments-transports.md`.
 
 ## 2. Create a one-time activation code
 
@@ -47,7 +47,7 @@ Supported `ttlSeconds` values are 60 to 3600. The API rejects pending/expired su
 
 ## 3. Enroll from Android
 
-In ABESS VPN, enter the HTTPS API base URL (without `/v1/enroll`) and the one-time code, then tap **Obtenir une configuration**. The app submits the code to `POST /v1/enroll`. A successful response supplies a WireGuard profile which is parsed locally before the user taps **Se connecter**.
+In LUNA, enter the HTTPS API base URL (without `/v1/enroll`) and the one-time code, then tap **Obtenir une configuration**. The app submits the code to `POST /v1/enroll`. A successful response supplies a WireGuard profile which is parsed locally before the user taps **Se connecter**.
 
 The code is consumed before peer provisioning. A failed provisioning attempt may therefore require an administrator to issue a new code. A code cannot be reused after successful or attempted enrollment.
 
