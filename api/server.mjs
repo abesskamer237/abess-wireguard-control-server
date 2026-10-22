@@ -3,7 +3,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { randomBytes, createHash, timingSafeEqual } from 'node:crypto';
+import { createEnrollmentSecret, hashEnrollmentToken, equalHexHash } from './enrollment-token.mjs';
 import { removeManagedPeerBlock } from './peer-config.mjs';
 
 const execFileAsync = promisify(execFile);
@@ -60,14 +60,6 @@ async function syncLiveConfig() {
   await fs.writeFile(tmp, stdout, {mode:0o600});
   try { await execFileAsync('wg', ['syncconf', 'wg0', tmp]); } finally { await fs.rm(tmp, {force:true}); }
 }
-function hashEnrollmentToken(token) {
-  return createHash('sha256').update(token, 'utf8').digest('hex');
-}
-function equalHexHash(a, b) {
-  if (typeof a !== 'string' || typeof b !== 'string' || !/^[a-f0-9]{64}$/.test(a) || !/^[a-f0-9]{64}$/.test(b)) return false;
-  const left = Buffer.from(a, 'hex'), right = Buffer.from(b, 'hex');
-  return left.length === right.length && timingSafeEqual(left, right);
-}
 async function createEnrollmentToken(name, ttlSeconds = 300) {
   if (!safeName(name)) throw Object.assign(new Error('invalid device name'), {status:400});
   if (!Number.isInteger(ttlSeconds) || ttlSeconds < 60 || ttlSeconds > 3600)
@@ -76,12 +68,12 @@ async function createEnrollmentToken(name, ttlSeconds = 300) {
   if (state.peers.some(p => p.name === name) ||
       state.enrollmentTokens.some(t => t.name === name && !t.usedAt && Date.parse(t.expiresAt) > Date.now()))
     throw Object.assign(new Error('peer or pending enrollment already exists for this name'), {status:409});
-  const token = randomBytes(32).toString('base64url');
+  const {token, tokenHash} = createEnrollmentSecret();
   const createdAt = new Date();
   const expiresAt = new Date(createdAt.getTime() + ttlSeconds * 1000);
   state.enrollmentTokens.push({
     name,
-    tokenHash: hashEnrollmentToken(token),
+    tokenHash,
     createdAt: createdAt.toISOString(),
     expiresAt: expiresAt.toISOString(),
     usedAt: null
