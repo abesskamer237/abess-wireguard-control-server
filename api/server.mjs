@@ -6,6 +6,7 @@ import { promisify } from 'node:util';
 import { createEnrollmentSecret, hashEnrollmentToken, equalHexHash, isEnrollmentTokenUsable } from './enrollment-token.mjs';
 import { removeManagedPeerBlock } from './peer-config.mjs';
 import { validateSubscriptionInput, isSubscriptionUsable, countSubscriptionPeers } from './access-control.mjs';
+import { verifyPaymentSignature } from './payment-webhook.mjs';
 
 const execFileAsync = promisify(execFile);
 const PORT = Number(process.env.PORT || 8787);
@@ -224,6 +225,29 @@ const server = http.createServer(async (req, res) => {
   const url = new URL(req.url || '/', 'http://127.0.0.1');
   try {
     if (req.method === 'GET' && url.pathname === '/health') return json(res, 200, {ok:true, service:'abess-wireguard-control-api'});
+    if (req.method === 'POST' && url.pathname === '/v1/webhooks/payment') {
+      const body = await readBody(req);
+      const secret = process.env.PAYMENT_WEBHOOK_SECRET || '';
+      if (!verifyPaymentSignature(body, secret, req.headers['x-abess-signature'])) {
+        return json(res, 401, {error:'invalid payment webhook signature'});
+      }
+      if (String(body.status).toLowerCase() !== 'paid' ||
+          String(body.currency || '').toUpperCase() !== 'XAF' ||
+          !Number.isSafeInteger(body.amountXaf) ||
+          typeof body.subscriptionId !== 'string' ||
+          typeof body.paymentReference !== 'string') {
+        return json(res, 400, {error:'invalid or unsupported payment event'});
+      }
+      const state = await readState();
+      const subscription = state.subscriptions.find(item => item.id === body.subscriptionId);
+      if (!subscription) return json(res, 404, {error:'subscription not found'});
+      if (subscription.amountXaf !== body.amountXaf || subscription.currency !== 'XAF') {
+        return json(res, 409, {error:'payment amount or currency does not match subscription'});
+      }
+      const task = queue.then(() => confirmSubscriptionPayment(body.subscriptionId, body.paymentReference));
+      queue = task.catch(() => {});
+      return json(res, 200, await task);
+    }
     if (req.method === 'POST' && url.pathname === '/v1/enroll') {
       const body = await readBody(req);
       const task = queue.then(() => enrollWithToken(body.token));
