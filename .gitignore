@@ -1,0 +1,6 @@
+.env
+*.conf
+*.key
+*.psk
+*.log
+node_modules/
