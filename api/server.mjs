@@ -1,4 +1,5 @@
 import http from 'node:http';
+import { randomBytes } from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
@@ -7,13 +8,14 @@ import { createEnrollmentSecret, hashEnrollmentToken, equalHexHash, isEnrollment
 import { removeManagedPeerBlock } from './peer-config.mjs';
 import { validateSubscriptionInput, isSubscriptionUsable, countSubscriptionPeers } from './access-control.mjs';
 import { verifyPaymentSignature } from './payment-webhook.mjs';
+import { verifyMonetbilNotification, validMonetbilAmount } from './monetbil.mjs';
 
 const execFileAsync = promisify(execFile);
 const PORT = Number(process.env.PORT || 8787);
 const HOST = process.env.HOST || '127.0.0.1';
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN || '';
 const WG_CONF = process.env.WG_CONF || '/etc/wireguard/wg0.conf';
-const STATE_DIR = process.env.STATE_DIR || '/var/lib/abess-wireguard-api';
+const STATE_DIR = process.env.STATE_DIR || '/var/lib/luna-wireguard-api';
 const ENDPOINT = process.env.SERVER_ENDPOINT || '';
 const DNS = process.env.CLIENT_DNS || '1.1.1.1';
 const ALLOWED_IPS = process.env.CLIENT_ALLOWED_IPS || '0.0.0.0/0';
@@ -47,6 +49,25 @@ async function readState() {
 }
 async function writeState(s) { await fs.writeFile(await statePath(), JSON.stringify(s, null, 2), {mode:0o600}); }
 function isAdmin(req) { return ADMIN_TOKEN.length >= 32 && (req.headers.authorization || '') === 'Bearer ' + ADMIN_TOKEN; }
+async function readMonetbilParams(req, url) {
+  const params = Object.fromEntries(url.searchParams.entries());
+  if (req.method === 'POST') {
+    const type = String(req.headers['content-type'] || '').toLowerCase();
+    let body = '';
+    for await (const chunk of req) {
+      body += chunk;
+      if (body.length > 16384) throw Object.assign(new Error('notification body too large'), {status:413});
+    }
+    if (body) {
+      if (type.includes('application/x-www-form-urlencoded')) {
+        for (const [key, value] of new URLSearchParams(body)) params[key] = value;
+      } else if (type.includes('application/json')) {
+        Object.assign(params, JSON.parse(body));
+      }
+    }
+  }
+  return params;
+}
 async function runWithInput(file, args, input) {
   return await new Promise((resolve, reject) => {
     const child = execFile(file, args, (error, stdout, stderr) => error ? reject(Object.assign(error, {stderr})) : resolve({stdout, stderr}));
@@ -170,7 +191,7 @@ async function createPeer(name, subscriptionId = null) {
   const publicKey = pubOut.trim();
   const {stdout:pskOut} = await execFileAsync('wg', ['genpsk']);
   const presharedKey = pskOut.trim();
-  const block = '\n# managed-by-abess-api:' + name + '\n[Peer]\nPublicKey = ' + publicKey + '\nPresharedKey = ' + presharedKey + '\nAllowedIPs = ' + ip + '/32\n';
+  const block = '\n# managed-by-luna-api:' + name + '\n[Peer]\nPublicKey = ' + publicKey + '\nPresharedKey = ' + presharedKey + '\nAllowedIPs = ' + ip + '/32\n';
   const current = await fs.readFile(WG_CONF, 'utf8');
   await fs.writeFile(WG_CONF, current.trimEnd() + '\n' + block, {mode:0o600});
   try { await syncLiveConfig(); }
@@ -224,7 +245,85 @@ async function expireSubscriptionsAndRevokePeers() {
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url || '/', 'http://127.0.0.1');
   try {
-    if (req.method === 'GET' && url.pathname === '/health') return json(res, 200, {ok:true, service:'abess-wireguard-control-api'});
+    if (req.method === 'GET' && url.pathname === '/health') return json(res, 200, {ok:true, service:'luna-wireguard-control-api'});
+    if (req.method === 'POST' && url.pathname === '/v1/payments/monetbil/checkout') {
+      const body = await readBody(req);
+      const serviceKey = process.env.MONETBIL_SERVICE_KEY || '';
+      const publicApiUrl = (process.env.PUBLIC_API_BASE_URL || '').replace(/\/$/, '');
+      if (!serviceKey || !publicApiUrl.startsWith('https://')) {
+        return json(res, 503, {error:'Monetbil is not configured: set MONETBIL_SERVICE_KEY and HTTPS PUBLIC_API_BASE_URL'});
+      }
+      if (typeof body.subscriptionId !== 'string' || !/^sub_[a-f0-9]{24}$/.test(body.subscriptionId)) {
+        return json(res, 400, {error:'valid subscriptionId is required'});
+      }
+      const phone = typeof body.phone === 'string' ? body.phone.replace(/[\s+()-]/g, '') : '';
+      if (!/^\d{8,15}$/.test(phone)) return json(res, 400, {error:'phone must contain 8–15 digits in international format without +'});
+      const state = await readState();
+      const subscription = state.subscriptions.find(item => item.id === body.subscriptionId);
+      if (!subscription) return json(res, 404, {error:'subscription not found'});
+      if (subscription.status !== 'pending_payment') return json(res, 409, {error:'subscription is not awaiting payment'});
+      const requestPayload = {
+        amount: subscription.amountXaf,
+        phone,
+        phone_lock: true,
+        locale: 'fr',
+        country: 'CM',
+        currency: 'XAF',
+        item_ref: subscription.id,
+        payment_ref: subscription.id,
+        user: subscription.customerId,
+        notify_url: publicApiUrl + '/v1/webhooks/monetbil'
+      };
+      const response = await fetch('https://api.monetbil.com/widget/v2.1/' + encodeURIComponent(serviceKey), {
+        method: 'POST',
+        headers: {'content-type':'application/json','accept':'application/json'},
+        body: JSON.stringify(requestPayload),
+        signal: AbortSignal.timeout(20000)
+      });
+      const result = await response.json().catch(() => null);
+      if (!response.ok || !result || result.success !== true || typeof result.payment_url !== 'string') {
+        console.error('[MONETBIL] Widget request failed with HTTP', response.status);
+        return json(res, 502, {error:'Monetbil did not return a payment URL'});
+      }
+      let paymentUrl;
+      try { paymentUrl = new URL(result.payment_url); }
+      catch { return json(res, 502, {error:'Monetbil returned an invalid payment URL'}); }
+      if (paymentUrl.protocol !== 'https:' || !['api.monetbil.com','www.monetbil.com'].includes(paymentUrl.hostname)) {
+        return json(res, 502, {error:'Monetbil returned an untrusted payment URL'});
+      }
+      return json(res, 200, {provider:'monetbil', subscriptionId:subscription.id, paymentUrl:paymentUrl.toString()});
+    }
+    if ((req.method === 'GET' || req.method === 'POST') && url.pathname === '/v1/webhooks/monetbil') {
+      const serviceKey = process.env.MONETBIL_SERVICE_KEY || '';
+      const serviceSecret = process.env.MONETBIL_SERVICE_SECRET || '';
+      if (!serviceKey || !serviceSecret) return json(res, 503, {error:'Monetbil notifications are not configured'});
+      const params = await readMonetbilParams(req, url);
+      if (String(params.service || '') !== serviceKey ||
+          !verifyMonetbilNotification(params, serviceSecret)) {
+        return json(res, 401, {error:'invalid Monetbil notification signature or service'});
+      }
+      if (String(params.status || '').toLowerCase() !== 'success') {
+        return json(res, 200, {received:true, activated:false});
+      }
+      const subscriptionId = String(params.payment_ref || params.item_ref || '');
+      const amountXaf = validMonetbilAmount(params.amount);
+      const currency = String(params.currency || '').toUpperCase();
+      const paymentReference = String(params.transaction_id || params.transaction_uuid || '').trim();
+      if (!/^sub_[a-f0-9]{24}$/.test(subscriptionId) || amountXaf === null ||
+          currency !== 'XAF' || paymentReference.length < 4 || paymentReference.length > 160) {
+        return json(res, 400, {error:'invalid or incomplete Monetbil payment notification'});
+      }
+      const state = await readState();
+      const subscription = state.subscriptions.find(item => item.id === subscriptionId);
+      if (!subscription) return json(res, 404, {error:'subscription not found'});
+      if (subscription.amountXaf !== amountXaf || subscription.currency !== currency) {
+        return json(res, 409, {error:'Monetbil amount or currency does not match subscription'});
+      }
+      const task = queue.then(() => confirmSubscriptionPayment(subscriptionId, paymentReference));
+      queue = task.catch(() => {});
+      await task;
+      return json(res, 200, {received:true, activated:true, subscriptionId});
+    }
     if (req.method === 'POST' && url.pathname === '/v1/webhooks/payment') {
       const body = await readBody(req);
       const secret = process.env.PAYMENT_WEBHOOK_SECRET || '';
@@ -297,7 +396,7 @@ const server = http.createServer(async (req, res) => {
   }
 });
 server.listen(PORT, HOST, () => {
-  console.log('ABESS WireGuard API listening on http://' + HOST + ':' + PORT);
+  console.log('LUNA WireGuard API listening on http://' + HOST + ':' + PORT);
   const expiryTimer = setInterval(() => {
     const task = queue.then(() => expireSubscriptionsAndRevokePeers());
     queue = task.catch(error => console.error('[EXPIRY] Reconciliation failed:', error.message));
