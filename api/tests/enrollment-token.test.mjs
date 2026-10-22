@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createEnrollmentSecret, hashEnrollmentToken, equalHexHash } from '../enrollment-token.mjs';
+import { createEnrollmentSecret, hashEnrollmentToken, equalHexHash, isEnrollmentTokenUsable } from '../enrollment-token.mjs';
 
 test('creates a high-entropy URL-safe enrollment code and stores only a hash', () => {
   const secret = createEnrollmentSecret();
@@ -17,4 +17,12 @@ test('compares valid hashes and rejects malformed or different hashes', () => {
   assert.equal(equalHexHash(first, same), true);
   assert.equal(equalHexHash(first, other), false);
   assert.equal(equalHexHash(first, 'not-a-hash'), false);
+});
+
+test('rejects expired, used, and malformed enrollment records', () => {
+  const now = Date.parse('2026-10-22T12:00:00.000Z');
+  assert.equal(isEnrollmentTokenUsable({expiresAt: '2026-10-22T12:01:00.000Z', usedAt: null}, now), true);
+  assert.equal(isEnrollmentTokenUsable({expiresAt: '2026-10-22T11:59:00.000Z', usedAt: null}, now), false);
+  assert.equal(isEnrollmentTokenUsable({expiresAt: '2026-10-22T12:01:00.000Z', usedAt: '2026-10-22T11:00:00.000Z'}, now), false);
+  assert.equal(isEnrollmentTokenUsable({expiresAt: 'not-a-date', usedAt: null}, now), false);
 });
